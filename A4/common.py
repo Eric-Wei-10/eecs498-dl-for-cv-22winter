@@ -84,7 +84,17 @@ class DetectorBackboneWithFPN(nn.Module):
         self.fpn_params = nn.ModuleDict()
 
         # Replace "pass" statement with your code
-        pass
+        self.fpn_params.update({
+          'c3_lateral_conv': nn.Conv2d(dummy_out['c3'].shape[1], self.out_channels, (1, 1)),
+          'c4_lateral_conv': nn.Conv2d(dummy_out['c4'].shape[1], self.out_channels, (1, 1)),
+          'c5_lateral_conv': nn.Conv2d(dummy_out['c5'].shape[1], self.out_channels, (1, 1)),
+        })
+
+        self.fpn_params.update({
+          'c3_output_conv': nn.Conv2d(self.out_channels, self.out_channels, (3, 3), padding=1),
+          'c4_output_conv': nn.Conv2d(self.out_channels, self.out_channels, (3, 3), padding=1),
+          'c5_output_conv': nn.Conv2d(self.out_channels, self.out_channels, (3, 3), padding=1),
+        })
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -111,7 +121,20 @@ class DetectorBackboneWithFPN(nn.Module):
         ######################################################################
 
         # Replace "pass" statement with your code
-        pass
+        c3, c4, c5 = backbone_feats['c3'], backbone_feats['c4'], backbone_feats['c5']
+
+        c5_lateral = self.fpn_params['c5_lateral_conv'](c5)
+        p5 = self.fpn_params['c5_output_conv'](c5_lateral)
+
+        p5_upsample = F.interpolate(p5, scale_factor=2, mode='bilinear')
+        c4_lateral = self.fpn_params['c4_lateral_conv'](c4)
+        p4 = self.fpn_params['c4_output_conv'](c4_lateral + p5_upsample)
+
+        p4_upsample = F.interpolate(p4, scale_factor=2, mode='bilinear')
+        c3_lateral = self.fpn_params['c3_lateral_conv'](c3)
+        p3 = self.fpn_params['c3_output_conv'](c3_lateral + p4_upsample)
+
+        fpn_feats['p3'], fpn_feats['p4'], fpn_feats['p5'] = p3, p4, p5
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -157,7 +180,11 @@ def get_fpn_location_coords(
         # TODO: Implement logic to get location co-ordinates below.          #
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        # use torch.cartesian_prod
+        _, _, H, W = feat_shape
+        x_coord = (torch.arange(H, dtype=dtype, device=device) + 0.5) * strides_per_fpn_level[level_name]
+        y_coord = (torch.arange(W, dtype=dtype, device=device) + 0.5) * strides_per_fpn_level[level_name]
+        location_coords[level_name] = torch.cartesian_prod(x_coord, y_coord)
         ######################################################################
         #                             END OF YOUR CODE                       #
         ######################################################################
@@ -196,7 +223,38 @@ def nms(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float = 0.5):
     # github.com/pytorch/vision/blob/main/torchvision/csrc/ops/cpu/nms_kernel.cpp
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    _, scored_indices = scores.sort(stable=True, dim=0, descending=True)
+    x1, y1 = boxes.select(1, 0), boxes.select(1, 1)
+    x2, y2 = boxes.select(1, 2), boxes.select(1, 3)
+    areas = (x2 - x1) * (y2 - y1)
+    num_boxes = boxes.shape[0]
+    compressed = torch.zeros(num_boxes, dtype=torch.bool, device=scores.device)
+    keept = torch.zeros(num_boxes, dtype=torch.long, device=scores.device)
+    nums_to_keep = 0
+
+    for _i in range(num_boxes):
+      i = scored_indices[_i]
+      if compressed[i]:
+        continue
+      keept[nums_to_keep] = i
+      nums_to_keep += 1
+
+      area_i = areas[i]
+      x1_i, y1_i = x1[i], y1[i]
+      x2_i, y2_i = x2[i], y2[i]
+
+      _j = torch.arange(_i+1, num_boxes, device=scores.device)
+      j = scored_indices[_j]
+      xx1, yy1 = torch.max(x1_i, x1[j]), torch.max(y1_i, y1[j])
+      xx2, yy2 = torch.min(x2_i, x2[j]), torch.min(y2_i, y2[j])
+      h = torch.clamp(yy2 - yy1, 0)
+      w = torch.clamp(xx2 - xx1, 0)
+      intersect = w * h
+      iou = intersect / (area_i + areas[j] - intersect)
+      mask = j[iou > iou_threshold]
+      compressed[mask] = True
+
+    keep = keept.narrow(0, 0, nums_to_keep)
     #############################################################################
     #                              END OF YOUR CODE                             #
     #############################################################################
